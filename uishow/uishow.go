@@ -3,12 +3,13 @@ package uishow
 import (
 	"errors"
 	"fmt"
+	"strings"
+	"time"
+
+	kafka "github.com/Shopify/sarama"
 	ui "github.com/gizak/termui" // <- ui shortcut, optional
 	"github.com/urfave/cli"
 	log "github.com/wupeaking/logrus"
-	kafka "github.com/Shopify/sarama"
-	"strings"
-	"time"
 )
 
 var renderCallBacks = make([]func() error, 0)

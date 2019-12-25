@@ -4,6 +4,7 @@
 *.so
 .idea/
 .vscode/
+vendor
 # Folders
 _obj
 _test

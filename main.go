@@ -1,18 +1,20 @@
 package main
 
 import (
+	"bufio"
 	"errors"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
+	kafka "github.com/Shopify/sarama"
+	kafkaCluster "github.com/bsm/sarama-cluster"
 	"github.com/urfave/cli"
 	ui "github.com/wupeaking/kafkainfo/uishow"
 	log "github.com/wupeaking/logrus"
-	kafka "github.com/Shopify/sarama"
-	kafkaCluster "github.com/bsm/sarama-cluster"
 )
 
 // 获取kafka的所有topic
@@ -127,14 +129,14 @@ func produceCommand(c *cli.Context) error {
 	addr := c.String("addr")
 	topic := c.String("topic")
 	count := c.Int("c")
-
 	msg := c.String("m")
+	group := c.String("g")
+	file := c.String("f")
 
 	if addr == "" || topic == "" {
 		log.Error("addr, topic参数必须设置")
 		return errors.New("addr, topic参数必须设置")
 	}
-
 	if msg == "" {
 		msg = "this is kakfainfo test "
 	}
@@ -143,11 +145,12 @@ func produceCommand(c *cli.Context) error {
 	}
 
 	config := kafka.NewConfig()
-	config.ClientID = "kafkainfo"
+	config.ClientID = group
 	// 同步模式的生产者 必须设置为TRUE
 	config.Producer.Return.Successes = true
 	// 生产者发往哪一个分区 默认是通过key的hash值 现在改为随机
 	config.Producer.Partitioner = kafka.NewRandomPartitioner
+	config.Net.SASL.Enable = false
 	produce, e := kafka.NewSyncProducer(strings.Split(addr, ","), config)
 
 	if e != nil {
@@ -157,25 +160,53 @@ func produceCommand(c *cli.Context) error {
 	defer produce.Close()
 
 	sumCount := 0
-	for count > 0 {
-		count--
-		proMsg := &kafka.ProducerMessage{
-			Topic:     topic,
-			Partition: int32(-1),
-			Key:       kafka.StringEncoder(time.Now().String()),
-		}
-		proMsg.Value = kafka.ByteEncoder(msg)
-		part, offset, err := produce.SendMessage(proMsg)
+	if file != "" {
+		fd, err := os.Open(file)
+		defer fd.Close()
 		if err != nil {
-			log.Error("生产消息失败")
-			break
-		} else {
-			sumCount++
-			log.Info("生产消息信息: ", "part: ", part, " offset:", offset)
+			log.Error("打开文件失败", err)
 		}
+		rd := bufio.NewReader(fd)
+		for {
+			line, err := rd.ReadBytes('\n')
+			if err == io.EOF {
+				break
+			} else if err != nil {
+				log.Error("读取文件内容失败", err)
+				return err
+			}
+			_, _, err = syncProduce(produce, line, topic)
+			if err == nil {
+				sumCount++
+			}
+		}
+		log.Info("生产消息成功个数: ", sumCount)
+	} else {
+		for count > 0 {
+			count--
+			_, _, err := syncProduce(produce, []byte(msg), topic)
+			if err == nil {
+				sumCount++
+			}
+		}
+		log.Info("生产消息成功个数: ", sumCount)
 	}
-	log.Info("生产消息成功个数: ", sumCount)
 	return nil
+}
+
+func syncProduce(producer kafka.SyncProducer, msg []byte, topic string) (int32, int64, error) {
+	proMsg := &kafka.ProducerMessage{
+		Topic: topic,
+		Value: kafka.ByteEncoder(msg),
+	}
+	part, offset, err := producer.SendMessage(proMsg)
+	if err != nil {
+		log.Error("生产消息失败")
+		return 0, 0, err
+	} else {
+		log.Info("生产消息信息: ", "part: ", part, " offset:", offset)
+	}
+	return part, offset, nil
 }
 
 // 消费kafka的内容
@@ -184,6 +215,7 @@ func consumCommand(c *cli.Context) error {
 	topic := c.String("topic")
 	count := c.Int("c")
 	forever := c.Bool("f")
+	group := c.String("g")
 
 	if addr == "" || topic == "" {
 		log.Error("addr, topic参数必须设置")
@@ -199,13 +231,14 @@ func consumCommand(c *cli.Context) error {
 	// 一秒同步一下偏移值
 	config.Consumer.Offsets.CommitInterval = 1 * time.Second
 	config.Consumer.Offsets.Initial = kafka.OffsetOldest
-	config.ClientID = "kafkainfo"
+	config.ClientID = group
 	//
 	config.Consumer.Return.Errors = true // 是否返回错误通知
 	config.Group.Return.Notifications = false
+	config.Net.SASL.Enable = false
 
 	// 创建一个消费者
-	consumer, err := kafkaCluster.NewConsumer(strings.Split(addr, ","), "kafkainfo",
+	consumer, err := kafkaCluster.NewConsumer(strings.Split(addr, ","), group,
 		[]string{topic}, config)
 	if err != nil {
 		log.Error("新建消费者失败", err)
@@ -304,6 +337,8 @@ func main() {
 			cli.StringFlag{Name: "addr, ip", Usage: "kafka集群的任意一个地址"},
 			cli.StringFlag{Name: "t, topic", Usage: "指定topic"},
 			cli.StringFlag{Name: "m, message", Usage: "消息内容"},
+			cli.StringFlag{Name: "g, group", Usage: "使用指定group", Value: "kafkainfo"},
+			cli.StringFlag{Name: "f, file", Usage: "将文件逐行消费到kafka"},
 			cli.IntFlag{Name: "c, count", Usage: "生产几份消息"},
 		}}
 
@@ -313,6 +348,7 @@ func main() {
 			cli.StringFlag{Name: "addr, ip", Usage: "kafka集群的任意一个地址"},
 			cli.StringFlag{Name: "t, topic", Usage: "指定topic"},
 			cli.IntFlag{Name: "c, count", Usage: "消费几份消息"},
+			cli.StringFlag{Name: "g, group", Usage: "使用指定group", Value: "kafkainfo"},
 			cli.BoolFlag{Name: "f, forerver", Usage: "一直消费 直到按下Ctrl-C"},
 		}}
 
